@@ -19,7 +19,7 @@ for loc, rs in sets:
         if loc == "misc" and not (code.startswith("misc_252") or code=="frostbite"): continue
         scores = scheme.score_for_round(H, r, rounded_score=True).astype(int).tolist()
         # store as descending deltas to keep it compact
-        entry = {"n": r.name, "loc": "indoor" if loc == "indoor" else "outdoor", "max": int(r.max_score()),
+        entry = {"n": r.name, "a": int(sum(p.n_arrows for p in r.passes)), "loc": "indoor" if loc == "indoor" else "outdoor", "max": int(r.max_score()),
                  "s": scores, "cls": {}}
         for bn, b in bows.items():
           for gn, g in genders.items():
