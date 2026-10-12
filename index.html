@@ -11,6 +11,16 @@
   // Only the page itself is reported: the sheet link and name in the address stay private.
   gtag('config', 'G-JF54HQGVLT', { page_location: location.origin + location.pathname, page_title: 'Archery Tracker' });
 </script>
+<script>
+  // Usage events for the admin dashboard: what was done here, never who did it.
+  window.ssTrack = function (name, detail) {
+    try { if (window.gtag) gtag('event', name, detail ? { detail: String(detail).slice(0, 60) } : {}); } catch (e) {}
+  };
+  document.addEventListener('click', function (e) {
+    var t = e.target.closest && e.target.closest('[data-tab]');
+    if (t) window.ssTrack('tab_viewed', t.getAttribute('data-tab'));
+  }, true);
+</script>
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>Archery Tracker</title>
 <meta name="description" content="A live archery progress tracker for club members: point it at your own Google Sheet to see handicaps, Archery GB classifications, personal bests and kit.">
@@ -3917,6 +3927,7 @@
 
   document.getElementById("connectForm").addEventListener("submit", function (ev) {
     ev.preventDefault();
+    if (window.ssTrack) window.ssTrack("sheet_connected");
     const errorEl = document.getElementById("connectError");
     const parsed = parseSheetInput(document.getElementById("sheetUrlInput").value);
     const kitRaw = document.getElementById("kitUrlInput").value.trim();
