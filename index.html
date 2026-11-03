@@ -770,7 +770,7 @@
         Your choice is remembered in this browser, and the page address can be bookmarked or shared.
       </p>
       <form class="connect-form" id="connectForm" novalidate>
-        <label for="sheetUrlInput">Google Sheet link</label>
+        <label for="sheetUrlInput">Google Sheet link, or your tracker link from the record keeper</label>
         <input type="text" id="sheetUrlInput" autocomplete="off" placeholder="https://docs.google.com/spreadsheets/d/.../edit?gid=...">
         <p class="field-note">Open the tab with your scores and copy the address. The sheet must be shared as "Anyone with the link can view" (Share, then General access).</p>
 
@@ -829,7 +829,9 @@
   // There is no sheet baked into this file: it comes from the URL
   // (?sheet=...&gid=...&name=...&kit=...), this browser's saved choice, or the
   // connect form.
-  const cfg = { id: null, gid: null, name: "", kit: "" };
+  const cfg = { id: null, gid: null, name: "", kit: "", t: "" };
+  // Goals and the saved copy are kept per archer: their workbook id, or their tracker link.
+  function cfgKey() { return cfg.id || ("t:" + cfg.t); }
   const CONFIG_KEY = "archery-tracker-config";
 
   // Optional kit tab. Add a tab to the same spreadsheet with these columns:
@@ -1725,7 +1727,7 @@
   };
 
   function goalFor(d) {
-    return num(store(STORAGE.goal + cfg.id + ":" + d));
+    return num(store(STORAGE.goal + cfgKey() + ":" + d));
   }
 
   function profileFor(entries) {
@@ -3672,7 +3674,7 @@
     else if (t.dataset.log !== undefined && t.matches("select[data-log]")) { state.logRound[t.dataset.log] = t.value; render("none"); focusSel('select[data-log]'); }
     else if (t.dataset.goal) {
       const v = num(t.value);
-      store(STORAGE.goal + cfg.id + ":" + t.dataset.goal, v === null ? null : String(Math.max(0, Math.min(150, Math.round(v)))));
+      store(STORAGE.goal + cfgKey() + ":" + t.dataset.goal, v === null ? null : String(Math.max(0, Math.min(150, Math.round(v)))));
       render("charts");
       focusSel('input[data-goal]');
     }
@@ -3784,6 +3786,39 @@
   // Google's CSV export does not send CORS headers, so a fetch() from github.io
   // is blocked. The gviz endpoint supports a JSONP callback via <script>, which
   // is not subject to CORS.
+  // Once the club's score book is live, an archer's scores come from the
+  // club records service (by their workbook id or private tracker link);
+  // until then, and if the service can't be reached, from the workbook.
+  function loadFromService(params, timeoutMs) {
+    return new Promise(function (resolve) {
+      const cb = "__trkArcher" + Date.now() + Math.floor(Math.random() * 1e6);
+      const s = document.createElement("script");
+      let done = false;
+      const finish = function (v) {
+        if (done) return; done = true; clearTimeout(timer);
+        try { delete window[cb]; } catch (e) { window[cb] = undefined; }
+        if (s.parentNode) s.parentNode.removeChild(s);
+        resolve(v);
+      };
+      const timer = setTimeout(function () { finish(null); }, timeoutMs || 20000);
+      window[cb] = function (res) { finish(res && res.ok && Array.isArray(res.rows) ? res : (res && res.error ? res : null)); };
+      s.onerror = function () { finish(null); };
+      const q = Object.keys(params).filter(function (k) { return params[k]; }).map(function (k) { return k + "=" + encodeURIComponent(params[k]); }).join("&");
+      s.src = CLUB_SERVICE + "?action=archer&" + q + "&callback=" + cb;
+      document.head.appendChild(s);
+    });
+  }
+  function loadArcherRows(sheetId, gid, token) {
+    return loadFromService({ sheet: sheetId || "", t: token || "" }).then(function (res) {
+      if (res && res.ok) return { rows: res.rows, name: res.name || "", junior: !!res.junior, source: "scorebook" };
+      if (!sheetId) throw new Error(res && res.error === "not-found" ? "This tracker link isn't recognised. Ask the record keeper for a new one." : "Couldn't reach the club's score book.");
+      return loadViaJsonp(sheetId, gid).then(function (response) {
+        const label = String((((response.table || {}).cols || [])[1] || {}).label || "").replace(/\s*category\s*$/i, "").trim();
+        return { rows: rowsFromGviz(response), name: label, source: "sheet" };
+      });
+    });
+  }
+
   function loadViaJsonp(sheetId, gid, timeoutMs) {
     return new Promise(function (resolve, reject) {
       const cbName = "__archeryGvizCb" + Date.now() + Math.floor(Math.random() * 1e6);
@@ -3944,12 +3979,13 @@
       } catch (e) { /* bad cache: ignore */ }
     }
 
-    loadViaJsonp(cfg.id, cfg.gid).then(function (response) {
+    loadArcherRows(cfg.id, cfg.gid, cfg.t).then(function (got) {
       if (gen !== loadGeneration) return;
-      const rows = rowsFromGviz(response);
-      // No name in the link: use the one on the sheet ("Neil Fletcher Category").
+      const rows = got.rows;
+      // No name in the link: use the one on the sheet ("Neil Fletcher Category"),
+      // or the score book's (never given for juniors).
       if (!cfg.name) {
-        const label = String((((response.table || {}).cols || [])[1] || {}).label || "").replace(/\s*category\s*$/i, "").trim();
+        const label = got.name || "";
         if (label && label.length < 60 && /[a-z]/i.test(label)) cfg.name = label;
       }
       if (JSON.stringify(rows) !== cachedKey) applyRows(rows, state.entries.length ? "none" : "enter");
@@ -3965,7 +4001,7 @@
       }
     });
 
-    if (cfg.kit) {
+    if (cfg.kit && cfg.id) {
       loadViaJsonp(cfg.id, cfg.kit).then(function (response) {
         if (gen !== loadGeneration) return;
         const kit = kitFromRows(rowsFromGviz(response));
@@ -3978,9 +4014,10 @@
   // Connect flow: which sheet to show
   // =====================================================================
   function sheetUrl(gid) {
+    if (!cfg.id) return RECORDS_SITE;
     return "https://docs.google.com/spreadsheets/d/" + cfg.id + "/edit?gid=" + (gid || cfg.gid);
   }
-  function cacheKey() { return STORAGE.cache + ":" + cfg.id + ":" + cfg.gid; }
+  function cacheKey() { return STORAGE.cache + ":" + cfgKey() + ":" + cfg.gid; }
   // Sidebar identity: the archer's name, never a junior's.
   function setIdentity() {
     document.getElementById("brandSub").textContent = cfg.junior ? "Junior archer" : (cfg.name || "Duston Bowmen");
@@ -3998,6 +4035,8 @@
 
   function configFromQuery() {
     const p = new URLSearchParams(location.search);
+    // A private tracker link from the record keeper: ?t=...
+    if (/^[0-9a-f]{16,40}$/.test(p.get("t") || "")) return { id: null, gid: "0", name: p.get("name") || "", kit: "", t: p.get("t") };
     const parsed = parseSheetInput(p.get("sheet"));
     if (!parsed) return null;
     if (/^\d+$/.test(p.get("gid") || "")) parsed.gid = p.get("gid");
@@ -4008,14 +4047,14 @@
   function configFromStorage() {
     try {
       const c = JSON.parse(store(CONFIG_KEY) || "null");
-      return c && c.id ? { id: c.id, gid: c.gid || "0", name: c.name || "", kit: c.kit || "" } : null;
+      return c && (c.id || c.t) ? { id: c.id || null, gid: c.gid || "0", name: c.name || "", kit: c.kit || "", t: c.t || "" } : null;
     } catch (e) { return null; }
   }
 
   function writeQuery(c) {
     const p = new URLSearchParams();
-    p.set("sheet", c.id);
-    p.set("gid", c.gid);
+    if (c.t && !c.id) p.set("t", c.t);
+    else { p.set("sheet", c.id); p.set("gid", c.gid); }
     if (c.name) p.set("name", c.name);
     if (c.kit) p.set("kit", c.kit);
     try { history.replaceState(null, "", location.pathname + "?" + p.toString() + location.hash); } catch (e) { /* ignore */ }
@@ -4043,7 +4082,7 @@
     resetView();
     store(CONFIG_KEY, null);
     try { history.replaceState(null, "", location.pathname); } catch (e) { /* ignore */ }
-    cfg.id = null; cfg.gid = null; cfg.name = ""; cfg.kit = "";
+    cfg.id = null; cfg.gid = null; cfg.name = ""; cfg.kit = ""; cfg.t = "";
     setIdentity();
     document.getElementById("viewTitle").textContent = "Connect your spreadsheet";
     document.getElementById("crumbs").textContent = "Archery Tracker · set up";
@@ -4059,7 +4098,7 @@
 
   function startTracker(c) {
     resetView();
-    cfg.id = c.id; cfg.gid = c.gid || "0"; cfg.name = c.name || ""; cfg.kit = c.kit || "";
+    cfg.id = c.id || null; cfg.gid = c.gid || "0"; cfg.name = c.name || ""; cfg.kit = c.kit || ""; cfg.t = c.t || "";
     store(CONFIG_KEY, JSON.stringify(cfg));
     writeQuery(cfg);
     document.getElementById("connectScreen").hidden = true;
@@ -4082,6 +4121,9 @@
     ev.preventDefault();
     if (window.ssTrack) window.ssTrack("sheet_connected");
     const errorEl = document.getElementById("connectError");
+    // A tracker link from the record keeper works here too.
+    const tok = /[?&]t=([0-9a-f]{16,40})/.exec(document.getElementById("sheetUrlInput").value);
+    if (tok) { errorEl.hidden = true; startTracker({ id: null, gid: "0", name: document.getElementById("archerNameInput").value.trim(), kit: "", t: tok[1] }); return; }
     const parsed = parseSheetInput(document.getElementById("sheetUrlInput").value);
     const kitRaw = document.getElementById("kitUrlInput").value.trim();
     const kitParsed = kitRaw ? parseSheetInput(kitRaw) : null;
